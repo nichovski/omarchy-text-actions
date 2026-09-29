@@ -1,0 +1,364 @@
+#!/usr/bin/env bash
+#
+# text-actions - engine behind the Omarchy text-actions overlay.
+#
+# Subcommands:
+#   toggle                       Hide the overlay if open, otherwise capture
+#                                the current selection and open it with that text.
+#   run --action <id> [--model <id>] -- <text>
+#                                Run a built-in action over <text>.
+#   run --custom [--model <id>] -- <text> --instruction <instr>
+#                                Apply a free-form instruction to <text>.
+#   paste <text>                 Copy <text> and paste it into the focused
+#                                window, replacing the current selection.
+#   copy <text>                  Copy <text> to the clipboard.
+#   capture                      Print the current selection (debugging).
+#   list                         Print the actions as JSON (id, label, icon).
+#   config                       Print the whole config file as JSON.
+#   models                       Print the model list and the default as JSON.
+#   model-save <json>            Add or update one model (upsert by id).
+#   model-delete <id>            Remove a model.
+#   set-model <id>               Make <id> the default model.
+#
+# Everything lives in one file: ~/.config/text-actions/config.json (override
+# with TEXT_ACTIONS_CONFIG). The overlay passes text as a plain argv element,
+# so text with quotes or newlines survives without escaping.
+
+set -euo pipefail
+
+PLUGIN_ID="nichovski.text-actions"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ACTIONS_FILE="${TEXT_ACTIONS_ACTIONS:-$SCRIPT_DIR/../actions.json}"
+CONFIG_FILE="${TEXT_ACTIONS_CONFIG:-$HOME/.config/text-actions/config.json}"
+EXTRA_RULE="Return only the resulting text, with no preamble, quotes or explanation."
+
+die() { printf 'text-actions: %s\n' "$1" >&2; exit 1; }
+
+# --- config ------------------------------------------------------------
+
+write_config() {
+  local dir tmp
+  dir="$(dirname -- "$CONFIG_FILE")"
+  mkdir -p "$dir"
+  tmp="$(mktemp "$dir/.config.XXXXXX")"
+  cat > "$tmp"
+  chmod 600 "$tmp"
+  mv "$tmp" "$CONFIG_FILE"
+}
+
+# Create the config if missing and upgrade the old provider/providers shape
+# to the single models list. Safe to call on every command.
+ensure_config() {
+  local dir
+  dir="$(dirname -- "$CONFIG_FILE")"
+  mkdir -p "$dir"
+  if [[ ! -f $CONFIG_FILE ]]; then
+    jq -n '{version:2, defaultModel:"", models:[]}' | write_config
+    return
+  fi
+  if ! jq -e 'type == "object" and has("models")' "$CONFIG_FILE" >/dev/null 2>&1; then
+    jq '
+      (.provider // "openrouter") as $p |
+      (.providers[$p] // {}) as $prov |
+      {
+        version: 2,
+        defaultModel: $p,
+        models: [{
+          id: $p,
+          label: ($prov.label // $prov.model // (if $p == "azure" then "Azure OpenAI" else $p end)),
+          type: (if $p == "azure" then "azure" else "openai" end),
+          baseUrl: ($prov.baseUrl // ""),
+          model: ($prov.model // ""),
+          apiKey: "",
+          apiKeyEnv: "",
+          keyCommand: ($prov.keyCommand // ""),
+          endpoint: ($prov.endpoint // ""),
+          deployment: ($prov.deployment // ""),
+          apiVersion: ($prov.apiVersion // "")
+        }]
+      }
+    ' "$CONFIG_FILE" | write_config || die "cannot read $CONFIG_FILE"
+  fi
+}
+
+cmd_config() {
+  ensure_config
+  jq '.' "$CONFIG_FILE"
+}
+
+cmd_models() {
+  ensure_config
+  jq -c '{current: (.defaultModel // ""), models: [(.models // [])[] | {id, label, type, model}]}' "$CONFIG_FILE"
+}
+
+cmd_set_model() {
+  local id="${1:?set-model needs a model id}"
+  ensure_config
+  jq -e --arg id "$id" 'any(.models[]?; .id == $id)' "$CONFIG_FILE" >/dev/null \
+    || die "unknown model: $id"
+  jq --arg id "$id" '.defaultModel = $id' "$CONFIG_FILE" | write_config
+}
+
+cmd_model_save() {
+  local raw="${1:?model-save needs a JSON object}" norm id type
+  ensure_config
+  jq -e 'type == "object"' <<<"$raw" >/dev/null 2>&1 || die "model-save expects a JSON object"
+
+  norm="$(jq -c '
+    .type = (.type // "openai") |
+    .model = (.model // "") |
+    .label = (.label // (if .model != "" then .model else "Model" end)) |
+    .id = (.id // (
+      (.label | ascii_downcase | gsub("[^a-z0-9]+"; "-") | gsub("^-+|-+$"; ""))
+    )) |
+    .baseUrl = (.baseUrl // "") |
+    .apiKey = (.apiKey // "") |
+    .apiKeyEnv = (.apiKeyEnv // "") |
+    .keyCommand = (.keyCommand // "") |
+    .endpoint = (.endpoint // "") |
+    .deployment = (.deployment // "") |
+    .apiVersion = (.apiVersion // "")
+  ' <<<"$raw")"
+
+  id="$(jq -r '.id' <<<"$norm")"
+  type="$(jq -r '.type' <<<"$norm")"
+  [[ -n $id ]] || die "the model needs a name so it can get an id"
+  [[ -n "$(jq -r '.model' <<<"$norm")" ]] || die "the model field is required"
+  if [[ $type == azure ]]; then
+    [[ -n "$(jq -r '.endpoint' <<<"$norm")" ]] || die "endpoint is required for Azure"
+    [[ -n "$(jq -r '.deployment' <<<"$norm")" ]] || die "deployment is required for Azure"
+    jq -e '.endpoint | test("^https?://")' <<<"$norm" >/dev/null || die "endpoint must be a URL"
+  else
+    [[ -n "$(jq -r '.baseUrl' <<<"$norm")" ]] || die "base URL is required"
+    jq -e '.baseUrl | test("^https?://")' <<<"$norm" >/dev/null || die "base URL must be a URL"
+  fi
+
+  jq --argjson m "$norm" '
+    .models = (((.models // []) | map(select(.id != $m.id))) + [$m]) |
+    if (.defaultModel // "") == "" then .defaultModel = $m.id else . end
+  ' "$CONFIG_FILE" | write_config
+  printf '%s\n' "$norm"
+}
+
+cmd_model_delete() {
+  local id="${1:?model-delete needs a model id}"
+  ensure_config
+  jq --arg id "$id" '
+    .models = ((.models // []) | map(select(.id != $id))) |
+    if (.defaultModel // "") == $id then .defaultModel = ((.models[0].id) // "") else . end
+  ' "$CONFIG_FILE" | write_config
+}
+
+# Print the model object to use: the given id, else the default, else the first.
+select_model() {
+  local id="${1:-}"
+  ensure_config
+  [[ -n $id ]] || id="$(jq -r '.defaultModel // empty' "$CONFIG_FILE")"
+  [[ -n $id ]] || id="$(jq -r '.models[0].id // empty' "$CONFIG_FILE")"
+  [[ -n $id ]] || die "no model configured - open the overlay settings (Ctrl+,)"
+  jq -c --arg id "$id" '.models[]? | select(.id == $id)' "$CONFIG_FILE"
+}
+
+# --- selection ---------------------------------------------------------
+
+# Terminals do not use plain Ctrl+C for copy; they need the shifted variant.
+is_terminal() {
+  case "$1" in
+    Alacritty|alacritty|foot|kitty|ghostty|com.mitchellh.ghostty|WezTerm|org.wezfurlong.wezterm|xterm|XTerm|st|st-256color|gnome-terminal|org.gnome.Terminal|konsole|tmux|zellij) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+active_class() { hyprctl activewindow -j 2>/dev/null | jq -r '.class // empty'; }
+
+# Wayland has no "read the focused app's selection" call, so emulate the copy
+# key, take the clipboard, then put the previous clipboard back.
+capture_selection() {
+  local prev sel class
+  prev="$(wl-paste -n 2>/dev/null || true)"
+  class="$(active_class)"
+  if is_terminal "$class"; then
+    wtype -M ctrl -M shift -k c -m shift -m ctrl
+  else
+    wtype -M ctrl -k c -m ctrl
+  fi
+  sleep 0.25
+  sel="$(wl-paste -n 2>/dev/null || true)"
+  if [[ -n $prev ]]; then
+    printf '%s' "$prev" | wl-copy >/dev/null 2>&1 || true
+  else
+    wl-copy --clear >/dev/null 2>&1 || true
+  fi
+  printf '%s' "$sel"
+}
+
+# --- overlay -----------------------------------------------------------
+
+plugin_open() {
+  [[ "$(omarchy-shell shell call "$PLUGIN_ID" isOpen "" 2>/dev/null || true)" == "true" ]]
+}
+
+cmd_toggle() {
+  if plugin_open; then
+    omarchy-shell shell hide "$PLUGIN_ID"
+    return
+  fi
+  local text payload
+  text="$(capture_selection)"
+  payload="$(jq -nc --arg t "$text" '{text:$t}')"
+  omarchy-shell shell summon "$PLUGIN_ID" "$payload"
+}
+
+# --- provider ----------------------------------------------------------
+
+# Resolve the API key for a model: literal value, then environment variable,
+# then a command that prints it. This keeps works-without-hort the default.
+api_key_of() {
+  local m="$1" key
+  key="$(jq -r '.apiKey // empty' <<<"$m")"
+  if [[ -n $key ]]; then printf '%s' "$key"; return; fi
+  local envname
+  envname="$(jq -r '.apiKeyEnv // empty' <<<"$m")"
+  if [[ -n $envname ]]; then
+    key="${!envname:-}"
+    [[ -n $key ]] || die "environment variable $envname is empty"
+    printf '%s' "$key"; return
+  fi
+  local cmd
+  cmd="$(jq -r '.keyCommand // empty' <<<"$m")"
+  if [[ -n $cmd ]]; then
+    key="$(bash -c "$cmd")" || die "the key command failed"
+    [[ -n $key ]] || die "the key command produced no key"
+    printf '%s' "$key"; return
+  fi
+  die "no API key configured for this model - open the overlay settings (Ctrl+,)"
+}
+
+# chat <model-json> <system> <user> - print the raw provider JSON response.
+chat() {
+  local m="$1" sys="$2" user="$3" type key body
+  type="$(jq -r '.type // "openai"' <<<"$m")"
+  key="$(api_key_of "$m")" || exit 1
+
+  case "$type" in
+    azure)
+      local endpoint deployment version url
+      endpoint="$(jq -r '.endpoint // empty' <<<"$m")"
+      deployment="$(jq -r '.deployment // empty' <<<"$m")"
+      version="$(jq -r '.apiVersion // "2024-10-21"' <<<"$m")"
+      url="${endpoint%/}/openai/deployments/$deployment/chat/completions?api-version=$version"
+      body="$(jq -nc --arg s "$sys" --arg u "$user" \
+        '{messages:[{role:"system",content:$s},{role:"user",content:$u}]}')"
+      curl -sS --max-time 120 "$url" \
+        -H "api-key: $key" -H 'Content-Type: application/json' \
+        -d "$body"
+      ;;
+    openai|*)
+      local base model
+      base="$(jq -r '.baseUrl // empty' <<<"$m")"
+      model="$(jq -r '.model // empty' <<<"$m")"
+      [[ -n $base ]] || die "the base URL is not set for this model"
+      [[ -n $model ]] || die "the model is not set for this model"
+      body="$(jq -nc --arg mdl "$model" --arg s "$sys" --arg u "$user" \
+        '{model:$mdl, messages:[{role:"system",content:$s},{role:"user",content:$u}]}')"
+      curl -sS --max-time 120 "${base%/}/chat/completions" \
+        -H "Authorization: Bearer $key" -H 'Content-Type: application/json' \
+        -d "$body"
+      ;;
+  esac
+}
+
+# --- commands ----------------------------------------------------------
+
+cmd_run() {
+  local kind="" action_id="" model_id="" text="" instruction="" sys response result err
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --action) kind=action; action_id="${2:?--action needs an id}"; shift 2 ;;
+      --custom) kind=custom; shift ;;
+      --model) model_id="${2:?--model needs an id}"; shift 2 ;;
+      --instruction) instruction="${2:?--instruction needs a value}"; shift 2 ;;
+      --) shift; text="${1-}"; shift || true ;;
+      *) text="${1-}"; shift ;;
+    esac
+  done
+
+  case "$kind" in
+    action)
+      sys="$(jq -r --arg id "$action_id" '.[] | select(.id == $id) | .prompt' "$ACTIONS_FILE")"
+      [[ -n $sys ]] || die "unknown action: $action_id"
+      ;;
+    custom)
+      [[ -n $instruction ]] || die "--custom needs --instruction"
+      sys="Apply this instruction to the text the user provides: ${instruction}."
+      ;;
+    *)
+      die "usage: text-actions run --action <id> [--model <id>] -- <text> | run --custom [--model <id>] -- <text> --instruction <instr>"
+      ;;
+  esac
+
+  [[ -n $text ]] || die "there is no text to work on"
+
+  local model
+  model="$(select_model "$model_id")" || exit 1
+  response="$(chat "$model" "$sys $EXTRA_RULE" "$text")" || exit 1
+  result="$(jq -r 'if .error then empty else (.choices[0].message.content // empty) end' <<<"$response")"
+  if [[ -z $result ]]; then
+    err="$(jq -r '.error.message // (.error | tostring) // empty' <<<"$response" 2>/dev/null || true)"
+    die "${err:-no result from the provider}: $response"
+  fi
+  printf '%s' "$result"
+}
+
+cmd_paste() {
+  local text="${1:?paste needs the text}" class
+  printf '%s' "$text" | wl-copy
+  # Give the overlay time to close so the selection's window is focused again.
+  sleep 0.25
+  class="$(active_class)"
+  if is_terminal "$class"; then
+    wtype -M ctrl -M shift -k v -m shift -m ctrl
+  else
+    wtype -M ctrl -k v -m ctrl
+  fi
+}
+
+cmd_copy() { printf '%s' "${1:?copy needs the text}" | wl-copy; }
+
+cmd_list() { jq -c '[.[] | {id, label, icon}]' "$ACTIONS_FILE"; }
+
+usage() {
+  cat <<'USAGE'
+Usage: text-actions <command> [args]
+
+  toggle
+  run --action <id> [--model <id>] -- <text>
+  run --custom [--model <id>] -- <text> --instruction <instr>
+  paste <text>
+  copy  <text>
+  capture
+  list
+  config
+  models
+  model-save <json>
+  model-delete <id>
+  set-model <id>
+USAGE
+}
+
+case "${1:-}" in
+  toggle)       shift; cmd_toggle "$@" ;;
+  run)          shift; cmd_run "$@" ;;
+  paste)        shift; cmd_paste "$@" ;;
+  copy)         shift; cmd_copy "$@" ;;
+  capture)      shift; capture_selection ;;
+  list)         shift; cmd_list ;;
+  config)       shift; cmd_config ;;
+  models)       shift; cmd_models ;;
+  model-save)   shift; cmd_model_save "$@" ;;
+  model-delete) shift; cmd_model_delete "$@" ;;
+  set-model)    shift; cmd_set_model "$@" ;;
+  ""|-h|--help) usage ;;
+  *) usage; exit 1 ;;
+esac

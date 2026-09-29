@@ -1,0 +1,44 @@
+[
+  {
+    "id": "improve",
+    "label": "Improve Writing",
+    "icon": "✦",
+    "prompt": "Improve the writing of the text the user provides: make it clearer and better phrased while keeping its meaning, language and tone."
+  },
+  {
+    "id": "grammar",
+    "label": "Fix Grammar & Spelling",
+    "icon": "✓",
+    "prompt": "Fix grammar, spelling and punctuation in the text the user provides. Keep the wording otherwise unchanged."
+  },
+  {
+    "id": "longer",
+    "label": "Make Longer",
+    "icon": "＋",
+    "prompt": "Expand the text the user provides with more detail while keeping its meaning and tone."
+  },
+  {
+    "id": "shorter",
+    "label": "Make Shorter",
+    "icon": "－",
+    "prompt": "Make the text the user provides more concise without losing its meaning."
+  },
+  {
+    "id": "simplify",
+    "label": "Simplify Language",
+    "icon": "◌",
+    "prompt": "Simplify the language of the text the user provides so it is easier to read, keeping the meaning."
+  },
+  {
+    "id": "rephrase",
+    "label": "Rephrase",
+    "icon": "↻",
+    "prompt": "Rephrase the text the user provides, keeping its meaning and language."
+  },
+  {
+    "id": "continue",
+    "label": "Continue Writing",
+    "icon": "→",
+    "prompt": "Continue writing from where the text the user provides stops, matching its style, language and tone. Return only the continuation."
+  }
+]

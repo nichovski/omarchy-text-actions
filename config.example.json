@@ -1,0 +1,19 @@
+{
+  "version": 2,
+  "defaultModel": "gpt-4o-mini",
+  "models": [
+    {
+      "id": "gpt-4o-mini",
+      "label": "GPT-4o mini",
+      "type": "openai",
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "model": "openai/gpt-4o-mini",
+      "apiKey": "",
+      "apiKeyEnv": "OPENROUTER_API_KEY",
+      "keyCommand": "",
+      "endpoint": "",
+      "deployment": "",
+      "apiVersion": ""
+    }
+  ]
+}
