@@ -123,10 +123,13 @@ run.
 
 ```
 text-actions toggle
-text-actions run --action <id> [--model <id>] -- <text>
-text-actions run --custom [--model <id>] -- <text> --instruction <instr>
-text-actions paste <text>
-text-actions copy  <text>
+# The overlay stages the selection in a runtime file, then runs an action
+# against it; the CLI can pass text explicitly instead.
+text-actions run --action <id> [--model <id>] [--staged] [-- <text>]
+text-actions run --custom [--model <id>] [--staged] [-- <text>] [--instruction <instr>]
+text-actions paste [<text>]     # no argument: pastes the last result
+text-actions copy  [<text>]     # no argument: copies the last result
+text-actions selection          # print the staged selection
 text-actions capture            # print the current selection (debugging)
 text-actions list               # actions as JSON
 text-actions config             # the whole config as JSON
@@ -135,6 +138,18 @@ echo '<json>' | text-actions model-save   # add or update one model (reads stdin
 text-actions model-delete <id>
 text-actions set-model <id>
 ```
+
+## Privacy
+
+Secrets and user text stay off the process command line:
+
+- The API key and the request body reach `curl` through `0600` files in a
+  private temp dir.
+- The overlay reads the selection from a runtime file and saves models over
+  stdin, so neither the selected text nor an `apiKey` is ever a process
+  argument.
+- `run`, `paste`, and `copy` read the staged selection/result from that file,
+  and provider responses are size-capped before they are buffered.
 
 ## License
 

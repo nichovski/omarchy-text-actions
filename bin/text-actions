@@ -40,6 +40,14 @@ TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/text-actions.XXXXXX")"
 chmod 700 "$TMP_DIR"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
+# Staged selection and result live in a private runtime dir, so user text never
+# has to travel through a process command line.
+STATE_DIR="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/text-actions"
+mkdir -p "$STATE_DIR"
+chmod 700 "$STATE_DIR" 2>/dev/null || true
+SELECTION_FILE="$STATE_DIR/selection"
+RESULT_FILE="$STATE_DIR/result"
+
 die() { printf 'text-actions: %s\n' "$1" >&2; exit 1; }
 
 # --- config ------------------------------------------------------------
@@ -113,7 +121,8 @@ cmd_model_save() {
   if [[ $# -ge 1 && -n ${1:-} ]]; then
     raw="$1"
   else
-    IFS= read -r raw || die "model-save needs a JSON object on stdin"
+    IFS= read -r raw || true
+    [[ -n $raw ]] || die "model-save needs a JSON object on stdin"
   fi
   jq -e 'type == "object"' <<<"$raw" >/dev/null 2>&1 || die "model-save expects a JSON object"
 
@@ -216,10 +225,16 @@ cmd_toggle() {
     omarchy-shell shell hide "$PLUGIN_ID"
     return
   fi
-  local text payload
-  text="$(capture_selection)"
-  payload="$(jq -nc --arg t "$text" '{text:$t}')"
-  omarchy-shell shell summon "$PLUGIN_ID" "$payload"
+  # Stage the captured text in the runtime dir; the overlay reads it from there,
+  # so the selection never appears in a command line.
+  capture_selection > "$SELECTION_FILE"
+  chmod 600 "$SELECTION_FILE" 2>/dev/null || true
+  omarchy-shell shell summon "$PLUGIN_ID" '{"staged":true}'
+}
+
+# Print the staged selection for the overlay.
+cmd_selection() {
+  if [[ -f $SELECTION_FILE ]]; then cat "$SELECTION_FILE"; fi
 }
 
 # --- provider ----------------------------------------------------------
@@ -290,7 +305,7 @@ chat() {
 # --- commands ----------------------------------------------------------
 
 cmd_run() {
-  local kind="" action_id="" model_id="" text="" instruction="" sys response result err
+  local kind="" action_id="" model_id="" text="" instruction="" staged=0 sys response result err
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -298,10 +313,15 @@ cmd_run() {
       --custom) kind=custom; shift ;;
       --model) model_id="${2:?--model needs an id}"; shift 2 ;;
       --instruction) instruction="${2:?--instruction needs a value}"; shift 2 ;;
+      --staged) staged=1; shift ;;
       --) shift; text="${1-}"; shift || true ;;
       *) text="${1-}"; shift ;;
     esac
   done
+
+  if (( staged )); then
+    text="$(cat "$SELECTION_FILE" 2>/dev/null || true)"
+  fi
 
   case "$kind" in
     action)
@@ -309,11 +329,12 @@ cmd_run() {
       [[ -n $sys ]] || die "unknown action: $action_id"
       ;;
     custom)
-      [[ -n $instruction ]] || die "--custom needs --instruction"
+      if [[ -z $instruction ]]; then IFS= read -r instruction || true; fi
+      [[ -n $instruction ]] || die "--custom needs an instruction"
       sys="Apply this instruction to the text the user provides: ${instruction}."
       ;;
     *)
-      die "usage: text-actions run --action <id> [--model <id>] -- <text> | run --custom [--model <id>] -- <text> --instruction <instr>"
+      die "usage: text-actions run --action <id> [--model <id>] [--staged] [-- <text>] | run --custom [--model <id>] [--staged] [-- <text>] [--instruction <instr>]"
       ;;
   esac
 
@@ -327,11 +348,16 @@ cmd_run() {
     err="$(jq -r '.error.message // (.error | tostring) // empty' <<<"$response" 2>/dev/null || true)"
     die "${err:0:MAX_RESULT_BYTES}${err:+: ${response:0:MAX_RESULT_BYTES}}"
   fi
-  printf '%s' "${result:0:MAX_RESULT_BYTES}"
+  result="${result:0:MAX_RESULT_BYTES}"
+  printf '%s' "$result" > "$RESULT_FILE"
+  chmod 600 "$RESULT_FILE" 2>/dev/null || true
+  printf '%s' "$result"
 }
 
 cmd_paste() {
-  local text="${1:?paste needs the text}" class
+  local text="${1:-}" class
+  [[ -n $text ]] || text="$(cat "$RESULT_FILE" 2>/dev/null || true)"
+  [[ -n $text ]] || die "nothing to paste"
   printf '%s' "$text" | wl-copy
   # Give the overlay time to close so the selection's window is focused again.
   sleep 0.25
@@ -343,7 +369,12 @@ cmd_paste() {
   fi
 }
 
-cmd_copy() { printf '%s' "${1:?copy needs the text}" | wl-copy; }
+cmd_copy() {
+  local text="${1:-}"
+  [[ -n $text ]] || text="$(cat "$RESULT_FILE" 2>/dev/null || true)"
+  [[ -n $text ]] || die "nothing to copy"
+  printf '%s' "$text" | wl-copy
+}
 
 cmd_list() { jq -c '[.[] | {id, label, icon}]' "$ACTIONS_FILE"; }
 
@@ -352,10 +383,11 @@ usage() {
 Usage: text-actions <command> [args]
 
   toggle
-  run --action <id> [--model <id>] -- <text>
-  run --custom [--model <id>] -- <text> --instruction <instr>
-  paste <text>
-  copy  <text>
+  run --action <id> [--model <id>] [--staged] [-- <text>]
+  run --custom [--model <id>] [--staged] [-- <text>] [--instruction <instr>]
+  paste [<text>]
+  copy  [<text>]
+  selection
   capture
   list
   config
@@ -371,6 +403,7 @@ case "${1:-}" in
   run)          shift; cmd_run "$@" ;;
   paste)        shift; cmd_paste "$@" ;;
   copy)         shift; cmd_copy "$@" ;;
+  selection)    shift; cmd_selection ;;
   capture)      shift; capture_selection ;;
   list)         shift; cmd_list ;;
   config)       shift; cmd_config ;;

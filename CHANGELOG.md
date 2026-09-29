@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-09-29
+
+### Security
+- The selected text no longer travels as a process argument. `toggle` stages it in a private runtime file, the overlay reads it from there, and `run`/`paste`/`copy` operate on the staged file. A custom instruction goes over stdin.
+
 ## [0.2.1] - 2026-09-29
 
 ### Security

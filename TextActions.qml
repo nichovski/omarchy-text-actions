@@ -27,6 +27,7 @@ Item {
   property bool busy: false
   property string resultText: ""
   property string errorText: ""
+  property bool stagedSelection: false
 
   // Settings: the model list lives in the one config file the script owns.
   property var config: ({ version: 2, defaultModel: "", models: [] })
@@ -73,6 +74,7 @@ Item {
     var payload = {}
     try { payload = JSON.parse(String(payloadJson || "{}")) } catch (e) { payload = {} }
     root.selectedText = String(payload.text || "")
+    root.stagedSelection = payload.staged === true
     root.filterText = ""
     root.selectedIndex = 0
     root.mode = "actions"
@@ -81,6 +83,7 @@ Item {
     root.errorText = ""
     root.refilter()
     root.opened = true
+    if (root.stagedSelection) { selectionProc.running = false; selectionProc.running = true }
     Qt.callLater(function() { input.forceActiveFocus() })
   }
 
@@ -134,7 +137,11 @@ Item {
     root.busy = true
     root.resultText = ""
     root.errorText = ""
-    runProc.command = [root.scriptPath, "run", "--action", id, "--", root.selectedText]
+    var args = [root.scriptPath, "run"]
+    if (root.stagedSelection) args.push("--staged")
+    args.push("--action"); args.push(id)
+    if (!root.stagedSelection) { args.push("--"); args.push(root.selectedText) }
+    runProc.command = args
     runProc.running = true
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
@@ -144,7 +151,12 @@ Item {
     root.busy = true
     root.resultText = ""
     root.errorText = ""
-    runProc.command = [root.scriptPath, "run", "--custom", "--", root.selectedText, "--instruction", instruction]
+    var args = [root.scriptPath, "run"]
+    if (root.stagedSelection) args.push("--staged")
+    args.push("--custom")
+    if (!root.stagedSelection) { args.push("--"); args.push(root.selectedText) }
+    runProc.instruction = instruction
+    runProc.command = args
     runProc.running = true
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
@@ -157,15 +169,14 @@ Item {
 
   function replaceSelection() {
     if (root.busy || root.resultText === "") return
-    var text = root.resultText
     root.dismiss()
-    pasteProc.command = [root.scriptPath, "paste", text]
+    pasteProc.command = [root.scriptPath, "paste"]
     pasteProc.running = true
   }
 
   function copyResult() {
     if (root.busy || root.resultText === "") return
-    copyProc.command = [root.scriptPath, "copy", root.resultText]
+    copyProc.command = [root.scriptPath, "copy"]
     copyProc.running = true
     root.dismiss()
   }
@@ -269,6 +280,14 @@ Item {
 
   Process {
     id: runProc
+    property string instruction: ""
+    stdinEnabled: true
+    onStarted: {
+      if (runProc.instruction !== "") {
+        write(runProc.instruction + "\n")
+        runProc.instruction = ""
+      }
+    }
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.resultText = text.slice(0, root.maxText)
@@ -284,6 +303,12 @@ Item {
         root.resultText = ""
       }
     }
+  }
+
+  Process {
+    id: selectionProc
+    command: [root.scriptPath, "selection"]
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.selectedText = text.slice(0, root.maxText) }
   }
 
   Process { id: pasteProc }
