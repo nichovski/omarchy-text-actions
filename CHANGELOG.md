@@ -4,6 +4,12 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-09-29
+
+### Security
+- The staged selection is capped (`TEXT_ACTIONS_MAX_SELECTION_BYTES`, default 200 KB) when captured and when written, so a huge clipboard payload cannot be buffered whole.
+- The state dir is created `0700` and verified to be a real, user-owned directory; `selection` and `result` are written through a fresh temp file plus `mv`, so a pre-existing symlink cannot redirect a write onto another file. Reads refuse symlinks.
+
 ## [0.2.2] - 2026-09-29
 
 ### Security
