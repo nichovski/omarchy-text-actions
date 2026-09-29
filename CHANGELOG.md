@@ -4,6 +4,13 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-29
+
+### Security
+- The API key and the selected text reach `curl` through files, never the process command line.
+- Provider responses are capped with `--max-filesize`, and result/error text is truncated before buffering.
+- Models are saved over stdin instead of as a command-line argument.
+
 ## [0.2.0] - 2026-09-29
 
 ### Added

@@ -49,6 +49,8 @@ Item {
   readonly property string pluginId: (root.manifest && root.manifest.id) || "nichovski.text-actions"
   readonly property string scriptPath: Quickshell.env("HOME") + "/.config/omarchy/plugins/" + root.pluginId + "/bin/text-actions"
 
+  readonly property int maxText: 100000
+
   // Shares the [menu] surface tokens so themes style this like the menu.
   property color background: Color.menu.background
   property color foreground: Color.menu.text
@@ -237,7 +239,7 @@ Item {
       deployment: root.fDeployment.trim(),
       apiVersion: root.fApiVersion.trim()
     }
-    saveProc.command = [root.scriptPath, "model-save", JSON.stringify(m)]
+    saveProc.payload = JSON.stringify(m)
     saveProc.running = true
   }
 
@@ -269,11 +271,11 @@ Item {
     id: runProc
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.resultText = text
+      onStreamFinished: root.resultText = text.slice(0, root.maxText)
     }
     stderr: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.errorText = text.trim()
+      onStreamFinished: root.errorText = text.trim().slice(0, root.maxText)
     }
     onExited: function(exitCode) {
       root.busy = false
@@ -290,14 +292,23 @@ Item {
   Process {
     id: configProc
     command: [root.scriptPath, "config"]
-    stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.applyConfig(text) }
-    stderr: StdioCollector { waitForEnd: true; onStreamFinished: if (text.trim() !== "") root.settingsError = text.trim() }
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.applyConfig(text.slice(0, 1000000)) }
+    stderr: StdioCollector { waitForEnd: true; onStreamFinished: if (text.trim() !== "") root.settingsError = text.trim().slice(0, root.maxText) }
   }
 
   Process {
     id: saveProc
+    property string payload: ""
+    stdinEnabled: true
+    command: [root.scriptPath, "model-save"]
+    onStarted: {
+      if (saveProc.payload !== "") {
+        write(saveProc.payload + "\n")
+        saveProc.payload = ""
+      }
+    }
     stdout: StdioCollector { waitForEnd: true }
-    stderr: StdioCollector { waitForEnd: true; onStreamFinished: if (text.trim() !== "") root.settingsError = text.trim() }
+    stderr: StdioCollector { waitForEnd: true; onStreamFinished: if (text.trim() !== "") root.settingsError = text.trim().slice(0, root.maxText) }
     onExited: function(code) {
       if (code === 0) { root.mode = "settings"; root.reloadConfig() }
       else if (root.settingsError === "") root.settingsError = "Could not save the model."
@@ -306,7 +317,7 @@ Item {
 
   Process {
     id: deleteProc
-    stderr: StdioCollector { waitForEnd: true; onStreamFinished: if (text.trim() !== "") root.settingsError = text.trim() }
+    stderr: StdioCollector { waitForEnd: true; onStreamFinished: if (text.trim() !== "") root.settingsError = text.trim().slice(0, root.maxText) }
     onExited: function(code) {
       if (code === 0) { root.mode = "settings"; root.reloadConfig() }
       else if (root.settingsError === "") root.settingsError = "Could not delete the model."
@@ -315,7 +326,7 @@ Item {
 
   Process {
     id: useProc
-    stderr: StdioCollector { waitForEnd: true; onStreamFinished: if (text.trim() !== "") root.settingsError = text.trim() }
+    stderr: StdioCollector { waitForEnd: true; onStreamFinished: if (text.trim() !== "") root.settingsError = text.trim().slice(0, root.maxText) }
     onExited: function(code) {
       if (code === 0) root.reloadConfig()
       else if (root.settingsError === "") root.settingsError = "Could not set the default model."

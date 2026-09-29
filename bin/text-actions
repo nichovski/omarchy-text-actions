@@ -31,6 +31,14 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ACTIONS_FILE="${TEXT_ACTIONS_ACTIONS:-$SCRIPT_DIR/../actions.json}"
 CONFIG_FILE="${TEXT_ACTIONS_CONFIG:-$HOME/.config/text-actions/config.json}"
 EXTRA_RULE="Return only the resulting text, with no preamble, quotes or explanation."
+MAX_RESPONSE_BYTES="${TEXT_ACTIONS_MAX_RESPONSE_BYTES:-2000000}"
+MAX_RESULT_BYTES="${TEXT_ACTIONS_MAX_RESULT_BYTES:-100000}"
+
+# curl reads the auth header and the request body from files, so neither the
+# API key nor the selected text ever shows up in the process command line.
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/text-actions.XXXXXX")"
+chmod 700 "$TMP_DIR"
+trap 'rm -rf "$TMP_DIR"' EXIT
 
 die() { printf 'text-actions: %s\n' "$1" >&2; exit 1; }
 
@@ -100,8 +108,13 @@ cmd_set_model() {
 }
 
 cmd_model_save() {
-  local raw="${1:?model-save needs a JSON object}" norm id type
+  local raw norm id type
   ensure_config
+  if [[ $# -ge 1 && -n ${1:-} ]]; then
+    raw="$1"
+  else
+    IFS= read -r raw || die "model-save needs a JSON object on stdin"
+  fi
   jq -e 'type == "object"' <<<"$raw" >/dev/null 2>&1 || die "model-save expects a JSON object"
 
   norm="$(jq -c '
@@ -234,24 +247,32 @@ api_key_of() {
   die "no API key configured for this model - open the overlay settings (Ctrl+,)"
 }
 
+# curl_chat <url> <auth-header> <body> - one chat completion, nothing on argv.
+curl_chat() {
+  local url="$1" auth="$2" body="$3"
+  printf '%s' "$auth" > "$TMP_DIR/header"
+  printf '%s' "$body" > "$TMP_DIR/body.json"
+  curl -sS --max-time 120 --max-filesize "$MAX_RESPONSE_BYTES" "$url" \
+    -H @"$TMP_DIR/header" -H 'Content-Type: application/json' \
+    -d @"$TMP_DIR/body.json"
+}
+
 # chat <model-json> <system> <user> - print the raw provider JSON response.
 chat() {
-  local m="$1" sys="$2" user="$3" type key body
+  local m="$1" sys="$2" user="$3" type key body url
   type="$(jq -r '.type // "openai"' <<<"$m")"
   key="$(api_key_of "$m")" || exit 1
 
   case "$type" in
     azure)
-      local endpoint deployment version url
+      local endpoint deployment version
       endpoint="$(jq -r '.endpoint // empty' <<<"$m")"
       deployment="$(jq -r '.deployment // empty' <<<"$m")"
       version="$(jq -r '.apiVersion // "2024-10-21"' <<<"$m")"
       url="${endpoint%/}/openai/deployments/$deployment/chat/completions?api-version=$version"
       body="$(jq -nc --arg s "$sys" --arg u "$user" \
         '{messages:[{role:"system",content:$s},{role:"user",content:$u}]}')"
-      curl -sS --max-time 120 "$url" \
-        -H "api-key: $key" -H 'Content-Type: application/json' \
-        -d "$body"
+      curl_chat "$url" "api-key: $key" "$body"
       ;;
     openai|*)
       local base model
@@ -261,9 +282,7 @@ chat() {
       [[ -n $model ]] || die "the model is not set for this model"
       body="$(jq -nc --arg mdl "$model" --arg s "$sys" --arg u "$user" \
         '{model:$mdl, messages:[{role:"system",content:$s},{role:"user",content:$u}]}')"
-      curl -sS --max-time 120 "${base%/}/chat/completions" \
-        -H "Authorization: Bearer $key" -H 'Content-Type: application/json' \
-        -d "$body"
+      curl_chat "${base%/}/chat/completions" "Authorization: Bearer $key" "$body"
       ;;
   esac
 }
@@ -306,9 +325,9 @@ cmd_run() {
   result="$(jq -r 'if .error then empty else (.choices[0].message.content // empty) end' <<<"$response")"
   if [[ -z $result ]]; then
     err="$(jq -r '.error.message // (.error | tostring) // empty' <<<"$response" 2>/dev/null || true)"
-    die "${err:-no result from the provider}: $response"
+    die "${err:0:MAX_RESULT_BYTES}${err:+: ${response:0:MAX_RESULT_BYTES}}"
   fi
-  printf '%s' "$result"
+  printf '%s' "${result:0:MAX_RESULT_BYTES}"
 }
 
 cmd_paste() {

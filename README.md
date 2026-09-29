@@ -131,7 +131,7 @@ text-actions capture            # print the current selection (debugging)
 text-actions list               # actions as JSON
 text-actions config             # the whole config as JSON
 text-actions models             # model list + default
-text-actions model-save <json>  # add or update one model
+echo '<json>' | text-actions model-save   # add or update one model (reads stdin)
 text-actions model-delete <id>
 text-actions set-model <id>
 ```
