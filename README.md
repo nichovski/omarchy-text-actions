@@ -5,6 +5,8 @@ Omarchy overlay. Pick a built-in action, or type a free-form instruction.
 Add your own models in an in-overlay settings screen. No account, no
 hard-coded provider, no dependency on any secret manager.
 
+![Text Actions overlay](preview.png)
+
 ```
 select text  ->  Super+Alt+A  ->  pick an action  ->  Enter replaces the selection
 ```
