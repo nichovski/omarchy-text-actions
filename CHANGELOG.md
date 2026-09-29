@@ -4,6 +4,15 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-09-29
+
+### Fixed
+- The previous clipboard is saved and restored whole, so an ordinary toggle no longer truncates a clipboard item larger than the selection cap.
+
+### Security
+- The state dir now carries an installation identity marker (`.identity`). A pre-existing `text-actions` directory without the marker is only adopted when it holds nothing but this plugin's staged files, and is never `chmod`ed or written into otherwise, so another program's directory cannot be taken over.
+- `private_write` refuses to replace a directory target.
+
 ## [0.2.3] - 2026-09-29
 
 ### Security

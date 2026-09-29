@@ -151,9 +151,10 @@ Secrets and user text stay off the process command line:
 - `run`, `paste`, and `copy` read the staged selection/result from that file,
   and provider responses are size-capped before they are buffered.
 - The staged selection is capped (`TEXT_ACTIONS_MAX_SELECTION_BYTES`, default
-  200 KB). The state dir is created `0700` and refuses a planted directory or
-  symlink; staged files are written through a fresh temp file, so a symlink
-  cannot redirect a write.
+  200 KB). The state dir is created `0700`, carries an installation identity
+  marker, and refuses a planted directory or symlink; staged files are written
+  through a fresh temp file, so a symlink cannot redirect a write. The previous
+  clipboard is saved and restored whole, so the cap never truncates it.
 
 ## License
 

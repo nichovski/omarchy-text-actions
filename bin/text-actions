@@ -41,25 +41,53 @@ TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/text-actions.XXXXXX")"
 chmod 700 "$TMP_DIR"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
+die() { printf 'text-actions: %s\n' "$1" >&2; exit 1; }
+
 # Staged selection and result live in a private state dir under the per-user
 # runtime dir, so user text never travels through a process command line and
 # only this user can read it.
 STATE_DIR="${XDG_RUNTIME_DIR:-$HOME/.local/state}/text-actions"
 SELECTION_FILE="$STATE_DIR/selection"
 RESULT_FILE="$STATE_DIR/result"
+STATE_MARKER="$STATE_DIR/.identity"
+STATE_IDENTITY="nichovski.text-actions state v1"
 
-# Reject a planted directory or symlink, and only ever write through a fresh
-# file, so a pre-existing symlink cannot redirect a write onto another file.
+# The state dir is ours alone: created 0700, stamped with an identity marker,
+# and never followed through a symlink. A pre-existing directory without our
+# marker is only adopted when it holds nothing but our own staged files, so it
+# can never be someone else's directory that we then chmod and write into.
 init_state_dir() {
-  if [[ -L $STATE_DIR ]]; then rm -f "$STATE_DIR" 2>/dev/null || true; fi
-  mkdir -p "$STATE_DIR" 2>/dev/null || die "cannot create $STATE_DIR"
+  local entry base
+  [[ -L $STATE_DIR ]] && rm -f "$STATE_DIR"
+
+  if [[ ! -e $STATE_DIR ]]; then
+    mkdir -m 700 "$STATE_DIR" 2>/dev/null || die "cannot create $STATE_DIR"
+  fi
   [[ -d $STATE_DIR && ! -L $STATE_DIR && -O $STATE_DIR ]] || die "unsafe state dir: $STATE_DIR"
+
+  if [[ ! -e $STATE_MARKER ]]; then
+    while IFS= read -r -d '' entry; do
+      base="${entry##*/}"
+      case "$base" in
+        selection|result|.tmp.*) rm -rf -- "$entry" ;;
+        *) die "state dir $STATE_DIR is not ours ($base); remove it and retry" ;;
+      esac
+    done < <(find "$STATE_DIR" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
+    printf '%s\n' "$STATE_IDENTITY" > "$STATE_MARKER" || die "cannot write $STATE_MARKER"
+  elif [[ -L $STATE_MARKER || ! -f $STATE_MARKER || ! -O $STATE_MARKER ]]; then
+    die "unsafe state marker: $STATE_MARKER"
+  elif [[ "$(cat "$STATE_MARKER" 2>/dev/null)" != "$STATE_IDENTITY" ]]; then
+    die "state dir $STATE_DIR belongs to another installation"
+  fi
+
   chmod 700 "$STATE_DIR" 2>/dev/null || true
+  chmod 600 "$STATE_MARKER" 2>/dev/null || true
 }
 
 private_write() { # <file>; reads stdin
   local f="$1" tmp
-  tmp="$(mktemp "$STATE_DIR/.tmp.XXXXXX")"
+  [[ ! -d $f || -L $f ]] || die "refusing to replace directory $f"
+  tmp="$(mktemp "$STATE_DIR/.tmp.XXXXXX")" || die "cannot stage a temp file"
   cat > "$tmp"
   chmod 600 "$tmp"
   mv -f "$tmp" "$f"
@@ -70,8 +98,6 @@ private_read() { # <file>
 }
 
 init_state_dir
-
-die() { printf 'text-actions: %s\n' "$1" >&2; exit 1; }
 
 # --- config ------------------------------------------------------------
 
@@ -219,8 +245,14 @@ active_class() { hyprctl activewindow -j 2>/dev/null | jq -r '.class // empty'; 
 # Wayland has no "read the focused app's selection" call, so emulate the copy
 # key, take the clipboard, then put the previous clipboard back.
 capture_selection() {
-  local prev sel class
-  prev="$(wl-paste -n 2>/dev/null | head -c "$MAX_SELECTION_BYTES" || true)"
+  local class had_prev=0
+  local prev="$TMP_DIR/prev-clipboard"
+  local sel="$TMP_DIR/selection"
+
+  # Keep the previous clipboard whole so it can be restored byte for byte. The
+  # byte cap applies only to what we stage, never to what we put back.
+  if wl-paste -n >"$prev" 2>/dev/null && [[ -s $prev ]]; then had_prev=1; fi
+
   class="$(active_class)"
   if is_terminal "$class"; then
     wtype -M ctrl -M shift -k c -m shift -m ctrl
@@ -228,13 +260,17 @@ capture_selection() {
     wtype -M ctrl -k c -m ctrl
   fi
   sleep 0.25
-  sel="$(wl-paste -n 2>/dev/null | head -c "$MAX_SELECTION_BYTES" || true)"
-  if [[ -n $prev ]]; then
-    printf '%s' "$prev" | wl-copy >/dev/null 2>&1 || true
+
+  # Cap only the staged selection, streaming it straight to a file.
+  wl-paste -n 2>/dev/null | head -c "$MAX_SELECTION_BYTES" >"$sel" || true
+
+  if (( had_prev )); then
+    wl-copy <"$prev" >/dev/null 2>&1 || true
   else
     wl-copy --clear >/dev/null 2>&1 || true
   fi
-  printf '%s' "$sel"
+
+  cat "$sel"
 }
 
 # --- overlay -----------------------------------------------------------
