@@ -34,6 +34,12 @@ already present on a normal Omarchy install.
 omarchy plugin add <git-url> --enable
 ```
 
+Remove it with:
+
+```bash
+omarchy plugin remove nichovski.text-actions --yes
+```
+
 Then bind `Super+Alt+A` to the plugin if it is not already bound:
 
 ```lua
